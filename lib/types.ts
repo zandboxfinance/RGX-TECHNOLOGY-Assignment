@@ -56,4 +56,17 @@ export type OverviewEvent =
   | { type: "synthesis_start"; data: { provider: string; atMs: number } }
   | { type: "token"; data: { text: string } }
   | { type: "done"; data: { totalMs: number; firstTokenMs: number | null } }
-  | { type: "error"; data: { message: string } };
+  | { type: "error"; data: RunError };
+
+/** A run that ended in failure. `atMs` is on the same clock as the other offsets, for the timeline. */
+export interface RunError {
+  message: string;
+  code?: "invalid_key" | "quota" | "overloaded" | "llm_error" | "agents_failed";
+  atMs?: number;
+  /** Some summary text had already streamed before the failure, so what's on screen is incomplete. */
+  partial?: boolean;
+  /** Whether running the query again can help (false for an invalid key). */
+  retryable?: boolean;
+  /** The failure was produced by a failure demo, not by Gemini. */
+  simulated?: boolean;
+}

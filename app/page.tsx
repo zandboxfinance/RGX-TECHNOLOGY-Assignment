@@ -3,9 +3,11 @@
 import { useEffect, useReducer, useRef, useState, type FormEvent } from "react";
 import { openResumableStream, type ConnectionState } from "@/lib/client/resumableStream";
 import { renderMarkdown } from "@/lib/client/markdown";
-import type { AgentName, AgentResult, Field, Lang, OverviewEvent } from "@/lib/types";
+import type { AgentName, AgentResult, Field, Lang, OverviewEvent, RunError } from "@/lib/types";
 import { strings } from "./i18n";
 import { Timeline, type ConnTrack } from "./Timeline";
+import { KeySetup, LlmChip, llmHeaders, type LlmChoice } from "./LlmSettings";
+import { GEMINI_MODEL_LABEL } from "@/lib/llm/model";
 
 type T = (typeof strings)[Lang];
 const AGENTS: AgentName[] = ["price", "valuation", "financial"];
@@ -21,6 +23,8 @@ interface View {
   /** Client-side estimate of the first token, used until `done` brings the server's number. */
   firstTokenAt: number | null;
   timing: { firstTokenMs: number | null; totalMs: number } | null;
+  /** How the run failed, if it did (Gemini error, all agents failed). Shown in the summary, status and timeline. */
+  runError: RunError | null;
   /** Client connection history on the same clock as the server offsets, for the timeline. */
   conn: ConnTrack;
   log: { text: string; sys?: boolean }[];
@@ -35,6 +39,7 @@ const empty: View = {
   synthesisAt: null,
   firstTokenAt: null,
   timing: null,
+  runError: null,
   conn: { segments: [], drops: [], resumes: [] },
   log: [],
 };
@@ -75,7 +80,7 @@ function reducer(v: View, a: Action): View {
     case "done":
       return { ...v, timing: e.data, log };
     case "error":
-      return { ...v, log };
+      return { ...v, runError: e.data, log };
   }
 }
 
@@ -113,6 +118,8 @@ export default function Page() {
   const [view, dispatch] = useReducer(reducer, empty);
   const [conn, setConn] = useState<ConnectionState | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Memory only, by design: the key is never written to storage and is gone after a reload.
+  const [llm, setLlm] = useState<LlmChoice>({ mode: "none" });
   const [now, setNow] = useState(0);
   const run = useRef<{ abort: AbortController; drop: () => void; t0: number; aligned: boolean } | null>(null);
   const t = strings[lang];
@@ -136,8 +143,14 @@ export default function Page() {
    *   a stream that finishes without `done`.
    * Both must be detected as a drop and resumed; they exercise different detection paths.
    */
-  function start(e?: FormEvent, demo: { clientDropAfterTokens?: number; serverDropAfterEvents?: number } = {}) {
+  function start(
+    e?: FormEvent,
+    demo: { clientDropAfterTokens?: number; serverDropAfterEvents?: number; simulateLlm?: "overloaded" } = {},
+    llmOverride?: LlmChoice,
+  ) {
     e?.preventDefault();
+    const useLlm = llmOverride ?? llm;
+    if (useLlm.mode === "none") return;
     run.current?.abort.abort();
     dispatch({ type: "reset" });
     setErrorMsg(null);
@@ -148,6 +161,7 @@ export default function Page() {
     const url = `/api/overview?symbol=${encodeURIComponent(symbol.trim())}&lang=${lang}`;
     const stream = openResumableStream({
       url,
+      headers: { ...llmHeaders(useLlm), ...(demo.simulateLlm && { "X-LLM-Simulate": demo.simulateLlm }) },
       firstUrl: demo.serverDropAfterEvents ? `${url}&drop_after=${demo.serverDropAfterEvents}` : undefined,
       signal: abort.signal,
       onEvent: (event, id) => {
@@ -157,7 +171,6 @@ export default function Page() {
           run.current.t0 = performance.now();
           run.current.aligned = true;
         }
-        if (event.type === "error") setErrorMsg(event.data.message);
         dispatch({ type: "event", event, id, at: elapsed() });
         if (event.type === "token" && ++tokens === demo.clientDropAfterTokens) stream.dropConnection();
       },
@@ -167,22 +180,34 @@ export default function Page() {
         if (s.kind === "reconnecting") dispatch({ type: "log", text: `connection lost (${s.reason}); retry #${s.attempt} in ${s.delayMs}ms` });
         if (s.kind === "open" && s.resumedFrom) dispatch({ type: "log", text: `reconnected, resuming after Last-Event-ID ${shortId(s.resumedFrom)}` });
         if (s.kind === "closed" && s.reason === "gave_up") setErrorMsg(s.detail ?? null);
-        if (s.kind === "closed" && s.reason === "error" && s.detail) setErrorMsg(s.detail);
+        if (s.kind === "closed" && s.reason === "error" && s.status && s.detail) setErrorMsg(s.detail); // HTTP 4xx
+        if (s.kind === "closed" && s.status === 401) setLlm({ mode: "none" }); // server needs a key: back to setup
       },
     });
     run.current = { abort, drop: stream.dropConnection, t0: performance.now(), aligned: false };
   }
 
   const asOf = Object.values(view.results).find((r) => r?.asOf)?.asOf;
+  const retry = () => start();
+  const retryInDemo = () => {
+    setLlm({ mode: "demo" });
+    start(undefined, {}, { mode: "demo" });
+  };
   const demoProps = {
     t,
     streaming,
     canDrop: conn?.kind === "open",
+    needsLlm: llm.mode === "none",
     onClientDemo: () => start(undefined, { clientDropAfterTokens: 3 }),
     onServerDemo: () => start(undefined, { serverDropAfterEvents: 8 }),
+    onLlmDemo: () => start(undefined, { simulateLlm: "overloaded" }),
     onDrop: () => run.current?.drop(),
   };
   const summarizing = streaming && view.provider !== null && !view.timing;
+  const needsLlm = llm.mode === "none";
+  // Badge for whichever LLM wrote (or will write) this summary.
+  const providerShown = view.provider ?? (llm.mode === "gemini" ? "gemini" : llm.mode === "demo" ? "demo" : null);
+  const badge = providerShown?.startsWith("gemini") ? t.badgeGemini(GEMINI_MODEL_LABEL) : providerShown === "demo" ? t.badgeDemo : null;
 
   return (
     <>
@@ -201,12 +226,13 @@ export default function Page() {
                 {t.stop}
               </button>
             ) : (
-              <button type="submit" className="primary">
+              <button type="submit" className="primary" disabled={needsLlm} title={needsLlm ? t.needKey : undefined}>
                 {t.get}
               </button>
             )}
           </form>
-          <ConnectionBar conn={conn} t={t} />
+          <ConnectionBar conn={conn} runError={view.runError} t={t} />
+          <LlmChip t={t} llm={llm} onChangeKey={() => setLlm({ mode: "none" })} onDemo={() => setLlm({ mode: "demo" })} />
 
           {/* Demo tools: inline on wide screens, folded into a 🧪 menu when the toolbar gets tight. */}
           <DemoTools variant="inline" {...demoProps} />
@@ -220,7 +246,7 @@ export default function Page() {
           <section className="card summary-card">
             <div className="card-head">
               <h2>{t.summary}</h2>
-              {view.provider && <span className="meta">{view.provider}</span>}
+              {badge && <span className={`llm-badge ${providerShown === "demo" ? "demo" : "gemini"}`}>{badge}</span>}
             </div>
             {view.sourceUrl && (
               <p className="source">
@@ -230,12 +256,26 @@ export default function Page() {
                 </a>
               </p>
             )}
-            <div className="summary">
-              {!conn && <p className="hint">{t.sub}</p>}
-              {renderMarkdown(view.summary)}
-              {summarizing && <span className="cursor" />}
-            </div>
-            {errorMsg && <p className="error">{errorMsg}</p>}
+            {needsLlm ? (
+              <KeySetup t={t} onUseKey={(key) => setLlm({ mode: "gemini", key })} onDemo={() => setLlm({ mode: "demo" })} />
+            ) : (
+              <div className={`summary${view.runError && !view.summary ? " empty" : ""}`}>
+                {!conn && <p className="hint">{llm.mode === "demo" ? t.readyDemoHint : t.readyHint}</p>}
+                {renderMarkdown(view.summary)}
+                {summarizing && <span className="cursor" />}
+              </div>
+            )}
+            {view.runError && !needsLlm && (
+              <RunErrorPanel
+                err={view.runError}
+                t={t}
+                canUseDemo={llm.mode === "gemini"}
+                onRetry={retry}
+                onDemo={retryInDemo}
+                onChangeKey={() => setLlm({ mode: "none" })}
+              />
+            )}
+            {errorMsg && !needsLlm && <p className="error">{errorMsg}</p>}
           </section>
 
           <div className="grid">
@@ -252,6 +292,10 @@ export default function Page() {
               synthesisAt: view.synthesisAt,
               firstTokenMs: view.timing?.firstTokenMs ?? view.firstTokenAt,
               totalMs: view.timing?.totalMs ?? null,
+              llmError:
+                view.runError?.atMs !== undefined
+                  ? { atMs: view.runError.atMs, code: view.runError.code, partial: !!view.runError.partial }
+                  : null,
               conn: view.conn,
             }}
             live={now}
@@ -270,16 +314,20 @@ function DemoTools({
   t,
   streaming,
   canDrop,
+  needsLlm,
   onClientDemo,
   onServerDemo,
+  onLlmDemo,
   onDrop,
 }: {
   variant: "inline" | "menu";
   t: T;
   streaming: boolean;
   canDrop: boolean;
+  needsLlm: boolean;
   onClientDemo: () => void;
   onServerDemo: () => void;
+  onLlmDemo: () => void;
   onDrop: () => void;
 }) {
   const menu = useRef<HTMLDetailsElement>(null);
@@ -289,8 +337,9 @@ function DemoTools({
     if (menu.current) menu.current.open = false;
   };
   const items = [
-    { label: t.demoClient, hint: t.demoClientHint, onClick: onClientDemo, disabled: streaming, primary: true },
-    { label: t.demoServer, hint: t.demoServerHint, onClick: onServerDemo, disabled: streaming, primary: true },
+    { label: t.demoClient, hint: needsLlm ? t.needKey : t.demoClientHint, onClick: onClientDemo, disabled: streaming || needsLlm, primary: true },
+    { label: t.demoServer, hint: needsLlm ? t.needKey : t.demoServerHint, onClick: onServerDemo, disabled: streaming || needsLlm, primary: true },
+    { label: t.demoLlm, short: t.demoLlmShort, hint: needsLlm ? t.needKey : t.demoLlmHint, onClick: onLlmDemo, disabled: streaming || needsLlm, primary: true },
     { label: t.drop, hint: t.dropHint, onClick: onDrop, disabled: !canDrop, primary: false },
   ];
 
@@ -300,7 +349,7 @@ function DemoTools({
         <span className="demo-label">{t.demo}</span>
         {items.map((it) => (
           <button key={it.label} type="button" className={it.primary ? "demo-run" : undefined} onClick={it.onClick} disabled={it.disabled} title={it.hint}>
-            {it.label}
+            {"short" in it && it.short ? it.short : it.label}
           </button>
         ))}
       </div>
@@ -324,6 +373,54 @@ function DemoTools({
         <p className="hint">{t.demoHint}</p>
       </div>
     </details>
+  );
+}
+
+/** What went wrong, what it means, and what to do about it. Agent data stays on screen regardless. */
+function RunErrorPanel({
+  err,
+  t,
+  canUseDemo,
+  onRetry,
+  onDemo,
+  onChangeKey,
+}: {
+  err: RunError;
+  t: T;
+  canUseDemo: boolean;
+  onRetry: () => void;
+  onDemo: () => void;
+  onChangeKey: () => void;
+}) {
+  const code = err.code ?? "llm_error";
+  const llmFailure = code !== "agents_failed";
+  return (
+    <>
+      {err.partial && <div className="partial-cut">⚠ {t.errCut}</div>}
+      <div className="run-error" role="alert">
+        <strong>⚠ {t.errTitle[code]}</strong>
+        <p>{t.errBody[code]}</p>
+        {err.simulated && <p className="hint">🧪 {t.errSimulated}</p>}
+        <div className="run-error-actions">
+          {err.retryable !== false && (
+            <button type="button" className="primary" onClick={onRetry}>
+              {err.partial ? t.regenerate : t.retry}
+            </button>
+          )}
+          {code === "invalid_key" && (
+            <button type="button" className="primary" onClick={onChangeKey}>
+              {t.chipChange}
+            </button>
+          )}
+          {llmFailure && code !== "invalid_key" && canUseDemo && (
+            <button type="button" onClick={onDemo}>
+              {t.useDemo}
+            </button>
+          )}
+        </div>
+        {llmFailure && <p className="hint">{t.errUnaffected}</p>}
+      </div>
+    </>
   );
 }
 
@@ -359,7 +456,7 @@ function EventLog({ log, t }: { log: View["log"]; t: T }) {
   );
 }
 
-function ConnectionBar({ conn, t }: { conn: ConnectionState | null; t: T }) {
+function ConnectionBar({ conn, runError, t }: { conn: ConnectionState | null; runError: RunError | null; t: T }) {
   const [dot, text] = ((): [string, string] => {
     if (!conn) return ["", t.idle];
     switch (conn.kind) {
@@ -372,7 +469,9 @@ function ConnectionBar({ conn, t }: { conn: ConnectionState | null; t: T }) {
       case "closed":
         if (conn.reason === "done") return ["ok", t.complete];
         if (conn.reason === "aborted") return ["", t.stopped];
-        return ["bad", conn.reason === "gave_up" ? t.gaveUp : t.failed];
+        if (conn.reason === "gave_up") return ["bad", t.gaveUp];
+        // the connection was fine; the run itself failed: say why
+        return ["bad", runError?.code ? t.statusFail[runError.code] : t.failed];
     }
   })();
   return (

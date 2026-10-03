@@ -5,10 +5,12 @@ export type ConnectionState =
   | { kind: "connecting" }
   | { kind: "open"; resumedFrom?: string }
   | { kind: "reconnecting"; attempt: number; delayMs: number; reason: string }
-  | { kind: "closed"; reason: "done" | "error" | "aborted" | "gave_up"; detail?: string };
+  | { kind: "closed"; reason: "done" | "error" | "aborted" | "gave_up"; detail?: string; status?: number };
 
 export interface StreamOptions {
   url: string;
+  /** Sent with every attempt, e.g. the user's LLM key. Headers, not the URL, so secrets stay out of logs. */
+  headers?: Record<string, string>;
   /** URL for the first attempt only (e.g. with ?drop_after=N); reconnects use `url`. */
   firstUrl?: string;
   onEvent: (e: OverviewEvent, id: string | undefined) => void;
@@ -58,13 +60,21 @@ export function openResumableStream(opts: StreamOptions): { done: Promise<void>;
       try {
         if (failures === 0) onState({ kind: "connecting" });
         const res = await fetchImpl(first && opts.firstUrl ? opts.firstUrl : opts.url, {
-          headers: lastEventId ? { "Last-Event-ID": lastEventId } : {},
+          headers: { ...opts.headers, ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}) },
           signal: attemptSignal,
           cache: "no-store",
         });
         first = false;
         if (res.status >= 400 && res.status < 500) {
-          onState({ kind: "closed", reason: "error", detail: `HTTP ${res.status}: ${await res.text()}` });
+          const body = await res.text();
+          let detail = `HTTP ${res.status}`;
+          try {
+            const j = JSON.parse(body) as { message?: string; error?: string };
+            detail = j.message ?? j.error ?? detail;
+          } catch {
+            if (body) detail += `: ${body}`;
+          }
+          onState({ kind: "closed", reason: "error", detail, status: res.status });
           return;
         }
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);

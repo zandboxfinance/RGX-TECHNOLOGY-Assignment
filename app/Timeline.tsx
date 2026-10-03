@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import type { AgentName, AgentResult, Lang } from "@/lib/types";
+import type { AgentName, AgentResult, Lang, RunError } from "@/lib/types";
 import { strings } from "./i18n";
 
 type T = (typeof strings)[Lang];
@@ -19,6 +19,8 @@ export interface TimelineData {
   synthesisAt: number | null;
   firstTokenMs: number | null;
   totalMs: number | null;
+  /** The run failed at `atMs` (server clock): the LLM row ends there with ✕ instead of freezing. */
+  llmError: { atMs: number; code?: RunError["code"]; partial: boolean } | null;
   conn: ConnTrack;
 }
 
@@ -36,7 +38,9 @@ export function Timeline({ data, live, streaming, t }: { data: TimelineData; liv
   const results = AGENTS.map((a) => data.results[a]);
   const agentEnd = Math.max(1, ...results.map((r) => (r ? r.startMs + r.latencyMs : 0)));
   const split = data.synthesisAt ?? Math.max(agentEnd, streaming ? live : 0);
-  const end = data.synthesisAt === null ? split : Math.max(data.totalMs ?? live, split + 1);
+  // When the run ended: `done`, or the failure time from the server, or (still running) now.
+  const finishedAt = data.totalMs ?? data.llmError?.atMs ?? null;
+  const end = data.synthesisAt === null ? split : Math.max(finishedAt ?? live, split + 1);
   const twoPhase = end > split;
 
   const x = (ms: number) => {
@@ -68,12 +72,20 @@ export function Timeline({ data, live, streaming, t }: { data: TimelineData; liv
   const idle = !streaming && results.every((r) => !r);
   const upstream = upstreamSummary(results, t);
   const firstToken = data.firstTokenMs;
-  const llmEnd = data.totalMs ?? live;
+  const llmEnd = finishedAt ?? live;
+  const failed = data.llmError !== null && data.synthesisAt !== null;
+  const errTitle = data.llmError?.code ? t.errTitle[data.llmError.code] : t.tlFailed;
 
   return (
     <section className="card timeline-card">
       <div className="card-head">
         <h2>{t.timeline}</h2>
+        {failed && (
+          <span className="meta bad">
+            {t.tlLlmFailed(fmt(llmEnd))}
+            {firstToken !== null && ` · ${t.firstToken} ${fmt(firstToken)}`}
+          </span>
+        )}
         {data.totalMs !== null && (
           <span className="meta">
             {t.firstToken} {firstToken !== null ? fmt(firstToken) : "—"} · {t.total} {fmt(data.totalMs)}
@@ -140,18 +152,41 @@ export function Timeline({ data, live, streaming, t }: { data: TimelineData; liv
             "llm",
             t.llm,
             data.synthesisAt !== null
-              ? `${t.ttftWait} ${firstToken !== null ? fmt(firstToken - data.synthesisAt) : "…"}\n${t.streamingOut} ${
-                  firstToken !== null ? fmt(llmEnd - firstToken) : "…"
-                }`
+              ? [
+                  `${t.ttftWait} ${firstToken !== null ? fmt(firstToken - data.synthesisAt) : failed ? "—" : "…"}`,
+                  firstToken !== null && `${t.streamingOut} ${fmt(llmEnd - firstToken)}`,
+                  failed && `✕ ${t.tlFailedAt(fmt(llmEnd))}: ${errTitle}`,
+                  failed && data.llmError!.partial && t.tlPartial,
+                ]
+                  .filter(Boolean)
+                  .join("\n")
               : undefined,
           )}
-          value={data.synthesisAt === null ? (streaming ? t.waiting : "—") : fmt(llmEnd - data.synthesisAt)}
+          value={
+            data.synthesisAt === null
+              ? data.llmError
+                ? t.tlSkipped // e.g. every agent failed, so there was nothing to summarize
+                : streaming
+                  ? t.waiting
+                  : "—"
+              : failed
+                ? t.tlFailed
+                : fmt(llmEnd - data.synthesisAt)
+          }
         >
           {data.synthesisAt !== null && (
             <>
-              <div className="tl-bar wait llm" style={span(data.synthesisAt, firstToken ?? llmEnd)} />
+              <div
+                className={`tl-bar wait llm${failed && firstToken === null ? " failed" : ""}`}
+                style={span(data.synthesisAt, firstToken ?? llmEnd)}
+              />
               {firstToken !== null && (
-                <div className={`tl-bar llm ${data.totalMs === null ? "live" : ""}`} style={span(firstToken, llmEnd)} />
+                <div className={`tl-bar llm ${finishedAt === null ? "live" : ""}`} style={span(firstToken, llmEnd)} />
+              )}
+              {failed && (
+                <span className="tl-pin fail" style={{ left: pct(x(llmEnd)) }} title={errTitle}>
+                  ✕
+                </span>
               )}
             </>
           )}
@@ -166,7 +201,7 @@ export function Timeline({ data, live, streaming, t }: { data: TimelineData; liv
         <ClientRow
           conn={data.conn}
           live={live}
-          end={data.totalMs}
+          end={finishedAt}
           span={span}
           x={x}
           gap={twoPhase}
@@ -190,6 +225,7 @@ export function Timeline({ data, live, streaming, t }: { data: TimelineData; liv
         <span><i className="sw ok" />{t.legendWork}</span>
         <span><i className="sw llm" />{t.legendStream}</span>
         <span><i className="sw drop" />{t.legendDrop}</span>
+        <span><i className="sw fail">✕</i>{t.legendFail}</span>
       </div>
     </section>
   );

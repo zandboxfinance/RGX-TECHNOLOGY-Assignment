@@ -13,7 +13,7 @@ function makeDeps(opts: { abandonAfterMs?: number } = {}): HandlerDeps {
   return {
     store: new StreamStore({ abandonAfterMs: opts.abandonAfterMs ?? 1_000, retainAfterDoneMs: 1_000 }),
     agents: createAgents(createPageFetcher({ fetchImpl: fixtureFetch(20).impl })),
-    provider: createMockProvider(2),
+    createProvider: () => createMockProvider(2),
   };
 }
 
@@ -30,7 +30,8 @@ async function readAll(res: Response): Promise<SseMessage[]> {
 
 const seq = (m: SseMessage) => Number(m.id!.split(":")[1]);
 const tokens = (ms: SseMessage[]) => ms.filter((m) => m.event === "token").map((m) => JSON.parse(m.data).text).join("");
-const req = (qs: string, headers: Record<string, string> = {}) =>
+const DEMO = { "X-LLM-Mode": "demo" };
+const req = (qs: string, headers: Record<string, string> = DEMO) =>
   new Request(`http://test/api/overview?${qs}`, { headers });
 
 describe("GET /api/overview", () => {
@@ -61,6 +62,7 @@ describe("GET /api/overview", () => {
     expect(first.at(-1)!.event).not.toBe("done");
 
     const lastId = first.at(-1)!.id!;
+    // resuming a live run needs no LLM credentials at all
     const rest = await readAll(await handleOverview(req("symbol=2330", { "Last-Event-ID": lastId }), deps));
     const all = [...first, ...rest];
     expect(all.map(seq)).toEqual(all.map((_, i) => i + 1));
@@ -71,7 +73,7 @@ describe("GET /api/overview", () => {
   });
 
   it("starts a fresh stream when the resume id is unknown or expired", async () => {
-    const msgs = await readAll(await handleOverview(req("symbol=2330", { "Last-Event-ID": "gone:12" }), makeDeps()));
+    const msgs = await readAll(await handleOverview(req("symbol=2330", { ...DEMO, "Last-Event-ID": "gone:12" }), makeDeps()));
     expect(msgs[0].event).toBe("meta");
     expect(seq(msgs[0])).toBe(1);
     expect(JSON.parse(msgs[0].data).streamId).not.toBe("gone");
@@ -79,9 +81,9 @@ describe("GET /api/overview", () => {
 
   it("stops generating when the client disappears and never comes back", async () => {
     const deps = makeDeps({ abandonAfterMs: 30 });
-    deps.provider = createMockProvider(20);
+    deps.createProvider = () => createMockProvider(20);
     const ac = new AbortController();
-    const res = await handleOverview(new Request("http://test/api/overview?symbol=2330", { signal: ac.signal }), deps);
+    const res = await handleOverview(new Request("http://test/api/overview?symbol=2330", { signal: ac.signal, headers: DEMO }), deps);
     const reader = res.body!.getReader();
     await reader.read();
     ac.abort();
@@ -102,6 +104,7 @@ describe("resumable client", () => {
     const ac = new AbortController();
     const stream = openResumableStream({
       url: "/api/overview?symbol=2330&lang=en",
+      headers: DEMO,
       fetchImpl,
       signal: ac.signal,
       baseDelayMs: 10,
@@ -135,6 +138,7 @@ describe("resumable client", () => {
     await openResumableStream({
       url: "/api/overview?symbol=2330&lang=en",
       firstUrl: "/api/overview?symbol=2330&lang=en&drop_after=8",
+      headers: DEMO,
       fetchImpl,
       signal: new AbortController().signal,
       baseDelayMs: 10,

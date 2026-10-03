@@ -1,10 +1,12 @@
 import type { Lang } from "@/lib/types";
 import type { StreamStore } from "@/lib/streamStore";
 import { runPipeline, type PipelineDeps } from "@/lib/pipeline";
+import { llmConfigFrom, type CreateProvider } from "@/lib/llm";
 import { encodeSse, formatEventId, parseEventId } from "@/lib/sse";
 
 export interface HandlerDeps extends PipelineDeps {
   store: StreamStore;
+  createProvider: CreateProvider;
   keepAliveMs?: number;
 }
 
@@ -16,6 +18,8 @@ const TERMINAL = new Set(["done", "error"]);
  * - No Last-Event-ID (or an expired one): start a new run and stream it from the beginning.
  * - Last-Event-ID "<streamId>:<seq>" of a live run: replay everything after <seq>, then continue live.
  *   The id can also be passed as ?lastEventId= for curl.
+ * - A new run needs an LLM: the user's key in X-Gemini-Key, or X-LLM-Mode: demo. Without either it
+ *   is rejected with 401 before any agent runs. Resuming a live run needs neither.
  * - ?drop_after=N: debug switch; the server closes this connection after N events to simulate a
  *   network drop, so the client's reconnect path can be demonstrated on demand.
  */
@@ -36,8 +40,15 @@ export async function handleOverview(req: Request, deps: HandlerDeps): Promise<R
   } else {
     // A new run. If the client asked to resume an expired stream, it will notice the new
     // streamId in the `meta` event and reset its view.
+    const llm = llmConfigFrom(req.headers);
+    if (!llm) {
+      return Response.json(
+        { error: "missing_api_key", message: "Enter a Gemini API key, or switch to demo mode." },
+        { status: 401 },
+      );
+    }
     session = deps.store.create();
-    void runPipeline(session, { symbol, lang }, deps);
+    void runPipeline(session, { symbol, lang, provider: deps.createProvider(llm) }, deps);
   }
 
   const s = session;

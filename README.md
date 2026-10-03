@@ -7,36 +7,94 @@ synthesizes them into a short summary **streamed over SSE**. If the connection d
 client shows it, reconnects with backoff, and **resumes from the last event it received** without
 re-running the LLM.
 
-Built with Next.js 15 (App Router) and TypeScript for both the API and the UI. Gemini Flash does
-the synthesis.
+Built with Next.js 15 (App Router) and TypeScript for both the API and the UI. **Google Gemini 3.1
+Flash-Lite** (`gemini-3.1-flash-lite`) does the synthesis, using an API key the user enters in the page.
+
+**Why Flash-Lite, pinned:**
+- The job is light: three bullets from numbers we supply, with no reasoning or outside knowledge.
+- A small model tends to give a faster first token, which the brief asks for.
+- In practice it is less often hit by 503 "high demand" than the larger models.
+- A pinned version (not a `-latest` alias) means behavior can't silently change.
 
 ## Running it
 
 ```bash
 npm install
-cp .env.example .env.local     # optional: add GEMINI_API_KEY
 npm run dev                    # http://localhost:3000
-npm test                       # 41 tests, no network needed
+npm test                       # 58 tests, no network needed
 ```
 
-**No API key?** Leave `GEMINI_API_KEY` empty and a deterministic mock summarizer streams a summary
-built from the agents' numbers. Streaming, resume and disconnect handling behave exactly as they do
-with the real model. A free key takes a minute at <https://aistudio.google.com/apikey>.
+No configuration or `.env` is needed. On first load, the page asks for a **Gemini API key**
+(free, about a minute at <https://aistudio.google.com/apikey>). The key is verified, then used for
+your queries. **No key yet?** Choose **demo mode**: a template writes the summary, clearly labeled
+"not AI". Everything else (parallel agents, streaming, timeline, disconnect and resume) works the
+same.
 
-Raw stream from the terminal:
+Raw stream from the terminal (pick an LLM with a header):
 
 ```bash
-curl -N "localhost:3000/api/overview?symbol=2330&lang=en"
-# simulate a drop after 7 events, then resume:
-curl -N "localhost:3000/api/overview?symbol=2330&drop_after=7"
+curl -N -H "X-Gemini-Key: $GEMINI_KEY" "localhost:3000/api/overview?symbol=2330&lang=en"
+curl -N -H "X-LLM-Mode: demo"           "localhost:3000/api/overview?symbol=2330&lang=en"
+# simulate a drop after 7 events, then resume (resuming needs no key):
+curl -N -H "X-LLM-Mode: demo" "localhost:3000/api/overview?symbol=2330&drop_after=7"
 curl -N -H "Last-Event-ID: <id of the last event you got>" "localhost:3000/api/overview?symbol=2330"
 ```
+
+### The Gemini API key
+
+- **Entered in the page, held in memory only.** The key lives in React state. It is never written to
+  `localStorage`, `sessionStorage` or cookies, so a reload clears it.
+- **Sent in a header, never in the URL.** Each query carries `X-Gemini-Key`. URLs end up in browser
+  history, proxy and server logs, and headers don't. This is a second payoff of using `fetch`
+  for SSE: `EventSource` can't set headers.
+- **The server doesn't keep it.** The key builds that run's Gemini client and nothing else. There
+  is no env var and no storage. Logs carry only an error code and message, and anything shaped like
+  a key is redacted from passed-through errors (tested).
+- **Verified before use.** `POST /api/llm/verify` fetches the pinned model's metadata. That costs no
+  generation quota, but fails immediately on a bad key, and also when the key can't use
+  `gemini-3.1-flash-lite`. Either problem shows up at setup, not mid-query.
+- **No key, no run.** Without `X-Gemini-Key` or `X-LLM-Mode: demo`, a new run gets `401` before any
+  agent starts. Resuming a live run needs neither.
+- **Errors you can act on.** See *When Gemini fails* below.
+
+### When Gemini fails
+
+Gemini sometimes fails, most often with **503 "This model is currently experiencing high demand"**.
+Nothing is retried automatically and the model never changes behind the user's back. Instead,
+every part of the page says what happened and offers the next step:
+
+| Failure | Code | What the user can do |
+| --- | --- | --- |
+| 503 high demand / overloaded | `overloaded` | ↻ Retry (usually temporary), or switch to demo mode |
+| 429 free-tier quota | `quota` | Retry in about a minute, or switch to demo mode |
+| Invalid or revoked key | `invalid_key` | Change key (retrying can't help) |
+| Other (500/504, timeout, network) | `llm_error` | Retry, or switch to demo mode |
+| Every agent failed | `agents_failed` | Retry (source unreachable or bad symbol); the LLM never runs |
+
+- **Error event.** The server sends a coded `error` event with `atMs` (failure time on the run's
+  clock), `partial` (did any text stream first?) and `retryable`.
+- **Summary card.** A panel shows the title, what the error means, the actions above, and a note
+  that the agents' data is unaffected. If text had already streamed, it stays, but a red dashed
+  line marks it **incomplete** and the action becomes *Regenerate*. Half a summary is never left
+  looking finished. Retrying re-runs the query, and the agents hit the 30 s page cache, so in
+  practice only Gemini is called again.
+- **Status pill.** Names the cause ("Summary failed: Gemini overloaded"), separate from a
+  connection failure.
+- **Timeline.** The LLM bar ends at the server's failure time with a red ✕, instead of freezing
+  where the last client tick left it. A failure before any text shows a hatched red wait, and the
+  header reads "LLM failed · 1.81 s". When every agent fails, the agent bars are red and the LLM row
+  reads "skipped".
+- **Agent cards and event log.** Unaffected: the numbers stay, and the `error` event is logged.
+- **Demo.** *▶ Gemini 503* in the 🧪 tools makes the server answer with a scripted 503. It never
+  calls Gemini or uses quota, and the panel says it was simulated. Tests also cover the mid-stream
+  variant.
 
 ### The UI
 
 A one-screen dashboard. When you press a button, you can watch everything react without scrolling:
-- **Pinned toolbar.** Query controls and connection status sit on the left. The 🧪 demo tools sit on
-  the right, fenced off with a dashed divider.
+- **Pinned toolbar.** Query controls, connection status and the **LLM chip** sit on the left. The
+  chip reads "✦ Gemini ✓ ••••x7Qa", "Gemini: no key" or "Demo mode (not AI)", and clicking it
+  changes the key or mode. The 🧪 demo tools sit on the right, fenced off with a dashed divider.
 - **Left column: what the user reads.** The summary, then the three agent cards.
 - **Right column: how the run behaved.** The timeline, plus an always-visible event log that
   auto-scrolls (unless you've scrolled up). The right column stays pinned while the left scrolls.
@@ -72,6 +130,7 @@ A one-screen dashboard. When you press a button, you can watch everything react 
   follow the language toggle (zh-TW / en). Change is colored by the Taiwan convention (red up,
   green down), and volume is in 張 (lots of 1,000 shares).
 - **🧪 Demo tools** (in the toolbar, kept apart from the product controls):
+  - **▶ Gemini 503** simulates Gemini failing (see *When Gemini fails*).
   - **The three ways a stream can die.** The client detects each one differently, and the first two
     have one-click demos:
 
@@ -233,13 +292,14 @@ If the page changes:
 
 ## Testing
 
-`npm test` runs 41 tests against the saved page snapshot. They don't touch the network.
+`npm test` runs 58 tests against the saved page snapshot. They don't touch the network.
 
 | Suite | What it proves |
 | --- | --- |
 | `parse.test.ts` | Every field of all three blocks matches the snapshot. A missing label → `partial`. No labels → error. Number parsing edge cases. |
 | `fetcher.test.ts` | 3 concurrent calls → 1 upstream request. Big5 decoding. TTL cache. A caller's abort doesn't cancel others. Failures aren't cached. A hung attempt is retried. The network error cause is reported. A 4xx isn't retried. |
 | `orchestrator.test.ts` | 3 × 300 ms agents finish in < 500 ms (parallel, not ~900 ms). The real agents, each with its own fetcher, all start before any finishes. Results arrive in completion order. Per-agent timeout and error isolation. |
+| `llm.test.ts` | No key → `401` before any agent runs. The header key reaches the provider. Demo mode runs without a key. Gemini errors map to `invalid_key` / `quota` / `overloaded` (503 "high demand") / `llm_error`. A failure before any text streams as `partial: false`, and one mid-stream as `partial: true` with the text already sent. Only an invalid key is non-retryable. The key never appears in streamed events or server logs, and key-shaped strings are redacted. |
 | `markdown.test.ts` | Bullets, bold and paragraphs render correctly. An unclosed `**` mid-stream stays literal. Model output containing HTML is escaped, not injected. |
 | `sse.test.ts` | The parser handles a message split at *every* possible byte boundary, plus multi-line data and comments. |
 | `streamStore.test.ts` | Replay from seq then live. Abandonment aborts generation. Reconnecting in time cancels abandonment. Retention expiry. |
@@ -257,8 +317,8 @@ If the page changes:
   replace the fetcher.
 - **Agent errors are logged** to the server console (`[agent:price] 2330 failed after …: …`) with
   the underlying cause, e.g. `upstream fetch failed: ECONNRESET (after 2 attempts)`.
-- **LLM fallback.** If Gemini errors (quota, bad key), the run ends with an `error` event while the
-  agent data stays on screen. Falling back to the mock/template summary would be a small change.
+- **LLM fallback.** If Gemini errors (quota, bad key), the run ends with a coded `error` event while
+  the agent data stays on screen. Offering a one-click retry in demo mode would be a small change.
 - **Each agent parses the page separately.** The timeline shows ~30 ms of parsing per agent in dev,
   so caching the parsed DOM alongside the HTML would cut that to one parse.
 - **Numbers in the LLM output aren't verified.** A post-check that every number in the summary

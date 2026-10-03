@@ -1,12 +1,12 @@
 import type { Agent, Lang } from "@/lib/types";
 import type { SummaryProvider } from "@/lib/llm/types";
+import { classifyLlmError } from "@/lib/llm/errors";
 import type { StreamSession } from "@/lib/streamStore";
 import { runAgents } from "@/lib/orchestrator";
 import { pageUrl } from "@/lib/agents/scrapeAgent";
 
 export interface PipelineDeps {
   agents: Agent[];
-  provider: SummaryProvider;
   agentTimeoutMs?: number;
 }
 
@@ -16,7 +16,7 @@ export interface PipelineDeps {
  */
 export async function runPipeline(
   session: StreamSession,
-  { symbol, lang }: { symbol: string; lang: Lang },
+  { symbol, lang, provider }: { symbol: string; lang: Lang; provider: SummaryProvider },
   deps: PipelineDeps,
 ): Promise<void> {
   const t0 = Date.now();
@@ -38,13 +38,16 @@ export async function runPipeline(
     );
     if (signal.aborted) return;
     if (results.every((r) => r.status === "error")) {
-      session.append({ type: "error", data: { message: `all agents failed (${results[0]?.error ?? "unknown"})` } });
+      session.append({
+        type: "error",
+        data: { message: `all agents failed (${results[0]?.error ?? "unknown"})`, code: "agents_failed", atMs: Date.now() - t0, retryable: true },
+      });
       return;
     }
 
-    session.append({ type: "synthesis_start", data: { provider: deps.provider.name, atMs: Date.now() - t0 } });
+    session.append({ type: "synthesis_start", data: { provider: provider.name, atMs: Date.now() - t0 } });
     const asOf = results.find((r) => r.asOf)?.asOf ?? null;
-    for await (const text of deps.provider.stream({ symbol, asOf, lang, results }, signal)) {
+    for await (const text of provider.stream({ symbol, asOf, lang, results }, signal)) {
       firstTokenMs ??= Date.now() - t0;
       session.append({ type: "token", data: { text } });
     }
@@ -53,8 +56,20 @@ export async function runPipeline(
     session.append({ type: "done", data: { totalMs: Date.now() - t0, firstTokenMs } });
   } catch (err) {
     if (!signal.aborted) {
-      console.error(`[synthesis] ${symbol} failed:`, err);
-      session.append({ type: "error", data: { message: `synthesis failed: ${err instanceof Error ? err.message : String(err)}` } });
+      const e = classifyLlmError(err);
+      // log the code and message only: never the error object, which could carry request config
+      console.error(`[synthesis] ${symbol} failed: ${e.code}: ${e.message}`);
+      session.append({
+        type: "error",
+        data: {
+          message: e.message,
+          code: e.code,
+          atMs: Date.now() - t0,
+          partial: firstTokenMs !== null,
+          retryable: e.retryable,
+          ...(provider.simulated && { simulated: true }),
+        },
+      });
     }
   } finally {
     session.finish();

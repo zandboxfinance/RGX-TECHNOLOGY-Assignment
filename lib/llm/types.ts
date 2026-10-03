@@ -9,6 +9,8 @@ export interface SummaryInput {
 
 export interface SummaryProvider {
   name: string;
+  /** Set by the failure demo, so its errors are labeled as simulated. */
+  simulated?: boolean;
   /** Yields text chunks as soon as they are generated. Must stop when `signal` aborts. */
   stream(input: SummaryInput, signal: AbortSignal): AsyncIterable<string>;
 }

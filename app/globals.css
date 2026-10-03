@@ -47,7 +47,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .toolbar-inner {
-  max-width: 1440px; margin: 0 auto; padding: 10px 16px; min-height: var(--tb-h);
+  margin: 0 auto; padding: 10px 16px; min-height: var(--tb-h);
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
 }
 h1 { font-size: 17px; margin: 0; white-space: nowrap; cursor: help; }
@@ -77,6 +77,61 @@ button.demo-run { border-color: var(--accent); color: var(--accent); }
 }
 .demo-item { display: flex; flex-direction: column; gap: 3px; }
 .demo-item .hint { margin: 0; font-size: 12px; }
+
+/* LLM (Gemini) chip in the toolbar */
+.spark { color: var(--accent); }
+.llm-chip { position: relative; }
+.llm-chip > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  padding: 5px 12px; border-radius: 99px; font-size: 13px; border: 1px solid var(--border); background: var(--bg);
+}
+.llm-chip > summary::-webkit-details-marker { display: none; }
+.llm-chip.none > summary { border-color: var(--warn); color: var(--warn); }
+.llm-chip.none .spark { color: var(--warn); }
+.llm-chip.gemini > summary { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.llm-pop {
+  position: absolute; left: 0; top: calc(100% + 6px); z-index: 30; width: min(300px, calc(100vw - 32px));
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 13px;
+}
+.llm-pop p { margin: 0 0 8px; }
+.llm-pop-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* summary badge naming the LLM */
+.llm-badge { font-size: 12px; padding: 2px 9px; border-radius: 99px; white-space: nowrap; }
+.llm-badge.gemini { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.llm-badge.demo { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+/* run failure: in the summary card, under whatever text had streamed */
+.partial-cut {
+  margin-top: 4px; padding-top: 6px; border-top: 2px dashed color-mix(in srgb, var(--bad) 60%, transparent);
+  color: var(--bad); font-size: 13px;
+}
+.run-error {
+  margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--border));
+  background: color-mix(in srgb, var(--bad) 6%, var(--panel));
+}
+.run-error strong { color: var(--bad); }
+.run-error p { margin: 4px 0 0; font-size: 14px; }
+.run-error .hint { font-size: 12px; }
+.run-error-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+/* first-run key setup (replaces the summary until an LLM is chosen) */
+.key-setup { margin-top: 6px; display: flex; flex-direction: column; gap: 10px; }
+.key-setup h3 { margin: 0; font-size: 16px; }
+.key-setup .hint { margin: 0; }
+.key-form { display: flex; flex-direction: column; gap: 8px; }
+.key-input { display: flex; gap: 6px; }
+.key-input input { flex: 1 1 auto; min-width: 0; font-family: var(--mono); font-size: 14px; }
+.key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 14px; }
+.key-actions a { color: var(--accent); text-decoration: none; }
+.key-actions a:hover { text-decoration: underline; }
+.key-privacy { margin: 0; font-size: 12px; color: var(--muted); background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.key-demo { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding-top: 10px; border-top: 1px dashed var(--border); font-size: 14px; }
+.key-demo .hint { flex-basis: 100%; font-size: 12px; }
+button.ghost { min-width: 0; color: var(--muted); }
+button.link { min-width: 0; padding: 0; border: none; background: none; color: var(--accent); text-decoration: underline; font-size: inherit; }
 
 /* 2. two-column dashboard */
 .dashboard {
@@ -130,6 +185,7 @@ label.check { display: flex; gap: 6px; align-items: center; color: var(--muted);
 .source a { color: var(--accent); text-decoration: none; }
 .source a:hover { text-decoration: underline; }
 .summary { min-height: 96px; margin-top: 8px; }
+.summary.empty { min-height: 0; margin: 0; }
 .summary p { margin: 0 0 6px; }
 .summary ul { margin: 0 0 6px; padding-left: 20px; }
 .summary li { margin: 2px 0; }
@@ -192,6 +248,11 @@ label.check { display: flex; gap: 6px; align-items: center; color: var(--muted);
 }
 .tl-pin { position: absolute; top: -1px; z-index: 3; transform: translateX(-50%); font-size: 11px; line-height: 18px; font-weight: 600; white-space: nowrap; }
 .tl-pin.drop { color: var(--bad); }
+.tl-pin.fail { color: var(--bad); font-size: 13px; }
+.tl-bar.wait.llm.failed {
+  background: repeating-linear-gradient(-45deg, color-mix(in srgb, var(--bad) 30%, var(--track)) 0 5px, var(--track) 5px 9px);
+}
+.meta.bad { color: var(--bad); }
 .tl-pin.resume { color: var(--ok); transform: none; padding-left: 2px; }
 .tl-row:has(.tl-marker) { margin-bottom: 12px; }
 .tl-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 12px; color: var(--muted); }
@@ -200,6 +261,7 @@ label.check { display: flex; gap: 6px; align-items: center; color: var(--muted);
 .sw.ok { background: var(--ok); }
 .sw.llm { background: var(--accent); }
 .sw.drop { background: repeating-linear-gradient(90deg, var(--bad) 0 4px, transparent 4px 7px); }
+.sw.fail { color: var(--bad); font-style: normal; font-size: 11px; line-height: 9px; text-align: center; width: auto !important; }
 
 /* agent cards */
 .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -220,6 +282,12 @@ td.down { color: var(--down); }
 
 /* Tablet / small laptop: summary and timeline stay side by side (the two things you watch), cards and
    log go full-width underneath. The column wrappers dissolve so their children join one grid. */
+/* Four demo buttons plus the LLM chip only fit on one toolbar line from ~1500 px. */
+@media (max-width: 1499px) {
+  .toolbar-demo { display: none; }
+  .demo-menu { display: block; }
+}
+
 @media (max-width: 1199px) {
   .dashboard {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -231,8 +299,6 @@ td.down { color: var(--down); }
   .timeline-card { grid-area: timeline; }
   .grid { grid-area: cards; }
   .log-card { grid-area: log; height: 240px; flex: none; }
-  .toolbar-demo { display: none; }
-  .demo-menu { display: block; }
 }
 
 /* Phone: one column, toolbar still pinned but trimmed to the essentials. */
@@ -245,6 +311,11 @@ td.down { color: var(--down); }
   .toolbar .controls > input { width: auto; flex: 1 1 60px; min-width: 56px; }
   .toolbar select { padding: 6px 4px; }
   .status { padding: 5px 8px; max-width: 34vw; }
+}
+@media (max-width: 767px) {
+  .llm-chip-text { display: none; } /* icon + colored border carry the state; full label in the tooltip */
+  .llm-chip > summary { padding: 5px 9px; }
+  .llm-pop { left: auto; right: 0; }
 }
 @media (max-width: 420px) {
   .status-text { display: none; } /* the colored dot stays; full text is in the tooltip */
