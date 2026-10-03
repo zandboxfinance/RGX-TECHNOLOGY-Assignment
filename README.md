@@ -7,6 +7,15 @@ synthesizes them into a short summary **streamed over SSE**. If the connection d
 client shows it, reconnects with backoff, and **resumes from the last event it received** without
 re-running the LLM.
 
+![Disconnect and resume demo](docs/demo-drop-resume.gif)
+
+*A real run with Gemini 3.1 Flash-Lite, using the **▶ Demo: client drop** button. The three agents
+start together and share one upstream request. After Gemini's first tokens, the connection is cut at
+the 3rd token, and the status reads "connection lost… reconnecting". The client resumes after
+`Last-Event-ID …:8`, and the summary completes exactly once. On the timeline, ✕ marks the drop and
+↻ #8 the resume. Playback is slowed at the drop so it's visible; the timings shown are real. The API
+key is masked.*
+
 Built with Next.js 15 (App Router) and TypeScript for both the API and the UI. **Google Gemini 3.1
 Flash-Lite** (`gemini-3.1-flash-lite`) does the synthesis, using an API key the user enters in the page.
 
@@ -15,6 +24,13 @@ Flash-Lite** (`gemini-3.1-flash-lite`) does the synthesis, using an API key the 
 - A small model tends to give a faster first token, which the brief asks for.
 - In practice it is less often hit by 503 "high demand" than the larger models.
 - A pinned version (not a `-latest` alias) means behavior can't silently change.
+
+**Measured** (two real runs, so a small sample):
+- First token at **2.4–4.6 s** after the request starts. The agents take about 0.25 s of that; the
+  rest is Gemini's own time to first token, which varied the most between runs.
+- Full summary at **3.3–5.4 s**. Once Gemini starts, it streams the whole summary in under 1 s.
+- Agent results are on screen within about 0.3 s, so the user sees real numbers long before the
+  first LLM token.
 
 ## Running it
 
